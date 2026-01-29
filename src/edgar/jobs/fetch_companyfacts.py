@@ -1,6 +1,8 @@
 import json
 import sys
 import time
+import tempfile
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +11,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import requests
 from tqdm import tqdm
 
-# Official SEC file that maps CIK<->ticker/name (you already snapshot this)
+# Official SEC file that maps CIK<->ticker/name
 CIK_SNAPSHOT_RELATIVE = Path("data/bronze/sec/company_tickers")
 
 # Official SEC companyfacts endpoint (extracted XBRL)
@@ -17,7 +19,7 @@ CIK_SNAPSHOT_RELATIVE = Path("data/bronze/sec/company_tickers")
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
 # REQUIRED by SEC: identify your app + contact.
-USER_AGENT = "edgar-ingest/0.1 (contact: mike.lake23@yahoo.com)"
+USER_AGENT = "edgar-ingestion/0.1 (contact: mike.lake23@yahoo.com)"
 
 # Polite client defaults (SEC guidance: don't be aggressive)
 REQUEST_TIMEOUT_SECS = 60
@@ -71,7 +73,7 @@ def load_ciks(snapshot_file: Path) -> List[int]:
 
     ciks: List[int] = []
     for _, row in data.items():
-        cik = row.get("cik_str")
+        cik = row["cik_str"]
         if isinstance(cik, int):
             ciks.append(cik)
     # de-dup + stable ordering
@@ -123,11 +125,30 @@ def write_bytes_atomic(path: Path, content: bytes) -> int:
     Returns bytes written.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "wb") as f:
-        f.write(content)
-    tmp.replace(path)
-    return len(content)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=path.name + ".",
+        suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
+
+    try: 
+        with os.fdopen(fd,"wb") as f: 
+            f.write(content)
+            f.flush
+            os.fsync(f.fileno())
+        
+        tmp.replace(path)
+        return len(content)
+    finally: 
+
+        if tmp.exists() and tmp!= path: 
+            try: 
+                tmp.unlink()
+            except OSError:
+                pass
+
 
 
 def iter_pending_ciks(
